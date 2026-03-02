@@ -1,0 +1,25 @@
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+ python generate_ssl.py
+ pip install Django
+pip install djangorestframework
+pip install djangorestframework-simplejwt
+pip install django-cors-headers
+
+
+
+cd C:\Users\rajes\Downloads\chatapp\chatapp\backend
+
+python -m venv venv
+venv\Scripts\activate
+
+pip install -r requirements.txt
+
+python generate_ssl.py
+
+python manage.py makemigrations accounts
+python manage.py makemigrations chat
+python manage.py migrate
+
+daphne -e ssl:8443:privateKey=key.pem:certKey=cert.pem -b 0.0.0.0 chatproject.asgi:application
