@@ -1,0 +1,363 @@
+ChatApp — Complete Project Explanation (Top to Bottom)
+
+1. What is this project?
+A real-time chat application — similar to WhatsApp Web — built with:
+
+Frontend: React (runs in the browser)
+Backend: Django (runs on the server)
+Real-time: WebSockets (instant messaging without page refresh)
+Calls: WebRTC (peer-to-peer voice and video calls)
+
+
+2. Project Structure
+chatapp/
+├── frontend/          ← React app (what the user sees)
+│   └── src/
+│       ├── pages/         Login, Register, Chat
+│       ├── components/    Sidebar, MessageBubble, CallManager
+│       ├── hooks/         useChatSocket, useSignalSocket
+│       ├── context/       AuthContext
+│       └── utils/         api.js
+│
+└── backend/           ← Django server (data + logic)
+    ├── chatproject/       settings, urls, asgi
+    ├── accounts/          user model, login, register
+    └── chat/              rooms, messages, websockets
+
+3. How the Technologies Connect
+Browser (React)
+      │
+      │  HTTPS (REST API)     → for login, loading messages
+      │  WSS  (WebSocket)     → for real-time chat
+      │  WebRTC (P2P)         → for voice/video calls
+      ▼
+Django Server (Daphne)
+      │
+      ├── REST API (DRF)      → handles HTTP requests
+      ├── WebSocket (Channels)→ handles real-time events
+      └── SQLite Database     → stores users, rooms, messages
+
+4. Authentication — How Login Works
+Technology: JWT (JSON Web Token)
+What is JWT?
+When you log in, the server gives you two tokens:
+
+Access Token — proves who you are (expires in 60 minutes)
+Refresh Token — used to get a new access token (expires in 7 days)
+
+Flow:
+User types email + password
+        ↓
+POST /api/auth/login/
+        ↓
+Django checks credentials
+        ↓
+Returns: { access_token, refresh_token, user }
+        ↓
+React saves tokens to localStorage
+        ↓
+Every future API request sends:
+  Authorization: Bearer <access_token>
+Token Refresh (auto-renewal):
+API call returns 401 (token expired)
+        ↓
+api.js interceptor catches it
+        ↓
+POST /api/auth/token/refresh/
+        ↓
+Get new access token silently
+        ↓
+Retry the original request
+        ↓
+User never notices anything
+Files involved:
+
+accounts/views.py → CustomTokenObtainPairView
+frontend/utils/api.js → interceptor handles refresh
+frontend/context/AuthContext.jsx → stores user state
+
+
+5. The Custom User Model
+Django has a built-in User model, but we extended it because we needed:
+
+Login with email instead of username
+Extra fields: avatar, is_online, last_seen, bio
+
+pythonclass User(AbstractUser):
+    email     = models.EmailField(unique=True)  # login field
+    is_online = models.BooleanField(default=False)
+    last_seen = models.DateTimeField(null=True)
+    bio       = models.CharField(max_length=255)
+    avatar    = models.ImageField(upload_to='avatars/')
+
+    USERNAME_FIELD = 'email'   # use email for login
+Important: AUTH_USER_MODEL = 'accounts.User' in settings tells Django to use our custom model everywhere.
+
+6. Database Models
+ChatRoom
+pythonclass ChatRoom(models.Model):
+    participants = ManyToManyField(User)  # exactly 2 users
+    created_at   = DateTimeField()
+    updated_at   = DateTimeField()        # updated when message sent
+Key method — get_or_create_room(user1, user2):
+Instead of creating a duplicate room every time, this method:
+
+Searches for an existing room where both users are participants
+If found → returns it
+If not → creates a new one
+
+python# Uses Count to find rooms with EXACTLY 2 participants
+.annotate(participant_count=Count('participants'))
+.filter(participant_count=2)
+Message
+pythonclass Message(models.Model):
+    room         = ForeignKey(ChatRoom)
+    sender       = ForeignKey(User)
+    content      = TextField()           # empty for file messages
+    message_type = CharField()           # text/image/audio/voice/video/document
+    file         = FileField(upload_to='chat_files/%Y/%m/%d/')
+    is_read      = BooleanField()
+    created_at   = DateTimeField()
+```
+
+---
+
+## 7. REST API — How HTTP Requests Work
+
+**Technology:** Django REST Framework (DRF)
+
+Every API call follows this path:
+```
+React (api.js)
+    ↓ HTTP request with JWT token
+Django urls.py → routes to the correct View
+    ↓
+View checks permission (IsAuthenticated)
+    ↓
+View queries the database
+    ↓
+Serializer converts Python objects → JSON
+    ↓
+JSON response sent back to React
+API Endpoints:
+MethodURLWhat it doesPOST/api/auth/login/Login, get tokensPOST/api/auth/register/Create accountPOST/api/auth/logout/Blacklist refresh tokenGET/api/auth/profile/Get current userGET/api/auth/users/List all usersGET/api/chat/rooms/Get sidebar roomsPOST/api/chat/rooms/create/Start chat with someoneGET/api/chat/rooms/<id>/messages/Load message historyPOST/api/chat/rooms/<id>/messages/send/Send a message
+What are Serializers?
+Serializers do two things:
+
+Validate incoming data (check email is unique, passwords match, etc.)
+Convert database objects to JSON for the response
+
+python# Input validation example
+class RegisterSerializer(serializers.ModelSerializer):
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise ValidationError('Email already taken')
+        return value
+
+# Output conversion example
+class MessageSerializer(serializers.ModelSerializer):
+    file_url = SerializerMethodField()
+
+    def get_file_url(self, obj):
+        # Convert relative path → full URL
+        # /media/chat_files/photo.jpg
+        # → https://localhost:8443/media/chat_files/photo.jpg
+        return request.build_absolute_uri(obj.file.url)
+```
+
+---
+
+## 8. WebSockets — How Real-Time Messaging Works
+
+**Technology:** Django Channels
+
+### Why WebSockets?
+Normal HTTP is **request-response** — the browser has to ask the server for new messages. WebSockets keep a **persistent connection** open so the server can push messages instantly.
+```
+Normal HTTP:
+  Browser → "Any new messages?" → Server → "No"   (every few seconds)
+
+WebSocket:
+  Browser ←——————— open connection ———————→ Server
+                    Server pushes instantly when message arrives
+```
+
+### How Django Channels Works:
+```
+HTTP requests  → Django views (normal)
+WebSocket      → Django Channels Consumers (async)
+ASGI (Asynchronous Server Gateway Interface) handles both:
+python# asgi.py
+ProtocolTypeRouter({
+    'http':      → Django views
+    'websocket': → Channels consumers
+})
+```
+
+### WebSocket Authentication Problem:
+Normal HTTP sends cookies/headers automatically. WebSockets don't support the `Authorization` header easily.
+
+**Solution:** Pass the JWT token in the URL:
+```
+wss://localhost:8443/ws/chat/4/?token=eyJhbG...
+```
+
+The `JWTAuthMiddleware` reads this token and sets `scope['user']` — similar to how `request.user` works in normal Django views.
+
+### Two WebSocket Connections:
+
+**1. Chat Socket** (`/ws/chat/<room_id>/`)
+- One per open chat room
+- Handles: typing indicators, read receipts
+- Receives new messages broadcast from the REST API
+
+**2. Signal Socket** (`/ws/signal/`)
+- One per logged-in user, always open
+- Handles: online/offline presence, WebRTC call signals
+
+### Message Flow (sending a message):
+```
+User types message → clicks Send
+        ↓
+React: POST /api/chat/rooms/4/messages/send/
+        ↓
+Django SaveMessageView saves to database
+        ↓
+Django calls channel_layer.group_send('chat_4', message)
+        ↓
+ChatConsumer.chat_message() runs for ALL connected clients
+        ↓
+Both users see the message instantly
+```
+
+---
+
+## 9. WebRTC — How Voice/Video Calls Work
+
+**Technology:** WebRTC (Web Real-Time Communication)
+
+### Key concept: Peer-to-Peer
+Unlike messages (which go through the server), WebRTC calls go **directly browser-to-browser**. The server is only used to help the two browsers **find each other** — this is called **signalling**.
+
+### Call Flow:
+```
+User A clicks "Call"          User B
+      │                           │
+      │── call_offer (SDP) ──────►│   (via Signal WebSocket)
+      │                           │ User B clicks Accept
+      │◄─ call_answer (SDP) ──────│   (via Signal WebSocket)
+      │                           │
+      │◄──── ICE candidates ──────│   (helps find network path)
+      │───── ICE candidates ─────►│
+      │                           │
+      └─────── Direct P2P audio/video stream ──────┘
+                   (no server in the middle)
+What is SDP?
+SDP (Session Description Protocol) — a text description of:
+
+What codecs the browser supports (H.264, VP8, Opus)
+What media tracks are offered (audio only / audio+video)
+
+What are ICE Candidates?
+ICE candidates are possible network paths between the two browsers (local IP, public IP, via STUN server). Both browsers share all their candidates and try each one until they find a path that works.
+STUN Server:
+pythonICE_SERVERS = {
+    'iceServers': [
+        { 'urls': 'stun:stun.l.google.com:19302' }
+    ]
+}
+```
+STUN (Session Traversal Utilities for NAT) helps each browser discover its **public IP address** so it can share it with the other browser. We use Google's free STUN server.
+
+---
+
+## 10. Frontend Architecture
+
+### State Management:
+No Redux. Uses **React Context + hooks** because the app is simple enough.
+```
+AuthContext (global)
+  └── user, login(), logout(), register()
+      Available to every component via useAuth()
+
+Chat.jsx (local state)
+  └── rooms, messages, room, call, isRecording...
+```
+
+### Custom Hooks:
+
+**`useChatSocket(roomId, onMessage)`**
+- Opens a WebSocket to `/ws/chat/<roomId>/`
+- Reconnects automatically if connection drops
+- Closes old connection when user switches rooms
+- Returns `{ send }` function
+
+**`useSignalSocket(onMessage)`**
+- Opens one persistent WebSocket to `/ws/signal/`
+- Always connected while logged in
+- Returns `{ send }` function
+
+### Component Tree:
+```
+App
+├── Login
+├── Register
+└── Chat
+    ├── Sidebar
+    │   ├── Room list (Chats tab)
+    │   └── User list (Contacts tab)
+    ├── Chat Header (name, online status, call buttons)
+    ├── Message List
+    │   └── MessageBubble (× many)
+    ├── Input Bar (emoji, attach, text, mic)
+    └── CallManager (shown when call is active)
+```
+
+### File Upload Flow:
+```
+User selects file
+        ↓
+FormData with file attached
+        ↓
+POST /api/chat/rooms/<id>/messages/send/
+        ↓
+Django detects MIME type → sets message_type
+        ↓
+file.save() → writes to backend/media/chat_files/
+        ↓
+Serializer builds absolute URL
+        ↓
+MessageBubble renders image/audio/video/document
+
+11. SSL / HTTPS Setup
+Why HTTPS locally?
+
+WebRTC getUserMedia() (microphone/camera) only works over HTTPS
+Secure WebSockets (wss://) require HTTPS
+CORS with credentials requires HTTPS
+
+How:
+
+generate_ssl.py creates cert.pem + key.pem (self-signed)
+Daphne (ASGI server) serves everything over SSL:
+
+bashdaphne -e ssl:8443:privateKey=key.pem:certKey=cert.pem -b 0.0.0.0 chatproject.asgi:application
+
+Browser shows "Not Secure" warning → click Advanced → Proceed (accepts self-signed cert)
+
+
+12. Quick Summary — One Sentence Each
+PartWhat it doesReactWhat the user sees and interacts withDjango REST FrameworkHandles HTTP requests, saves data to DBDjango ChannelsHandles WebSocket connectionsJWTProves who the user is on every requestWebSocketsPushes new messages instantly without refreshingWebRTCDirect browser-to-browser audio/video streamSTUNHelps two browsers find each other's IPSerializersValidate input and convert DB objects to JSONDaphneThe server that runs everything (HTTP + WebSocket + SSL)SQLiteStores all users, rooms, and messages
+
+13. How to Explain to Your TL in 2 Minutes
+
+"This is a full-stack real-time chat app. The frontend is React, backend is Django. Users log in with email and JWT tokens — the token is sent with every API request so Django knows who's calling.
+
+
+For real-time messaging, we use WebSockets through Django Channels. When you send a message, it hits the REST API, gets saved to the database, then the server broadcasts it through the WebSocket so the other person sees it instantly.
+
+
+For voice and video calls, we use WebRTC. The two browsers connect directly to each other — the server only helps them find each other using a STUN server and our Signal WebSocket. Once connected, audio and video stream peer-to-peer.
+
+
+We run everything through Daphne with a self-signed SSL certificate because WebRTC requires HTTPS to access the microphone and camera."
